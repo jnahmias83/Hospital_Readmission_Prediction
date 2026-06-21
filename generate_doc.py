@@ -1,8 +1,112 @@
 import os
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from imblearn.over_sampling import SMOTE
 from docx import Document
 from docx.shared import Pt, Inches
 
 os.makedirs("output", exist_ok=True)
+os.makedirs("output/figures", exist_ok=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RUN THE ML PIPELINE — save every chart as a PNG
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 1. Load and prepare
+df = pd.read_csv("input/diabetic_data.csv")
+df.columns = df.columns.str.strip()
+df.dropna(subset=["readmitted"], inplace=True)
+df.drop(["encounter_id","patient_nbr","admission_type_id",
+         "discharge_disposition_id","admission_source_id"], axis=1, inplace=True)
+df["readmitted"] = df["readmitted"].map({"<30":1,">30":0,"No":0})
+df_copy = df.copy()
+
+# 2. X / y
+X = df_copy.drop("readmitted", axis=1)
+y = df_copy["readmitted"]
+X = X[y.notna()]
+y = y[y.notna()]
+
+# 3. Encode
+cat_cols = X.select_dtypes(include=["object"]).columns
+X[cat_cols] = X[cat_cols].fillna("Unknown")
+encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+X[cat_cols] = encoder.fit_transform(X[cat_cols])
+
+# 4. Split + SMOTE
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
+sm = SMOTE(random_state=42)
+X_res, y_res = sm.fit_resample(X_train, y_train)
+
+# 5. Random Forest
+rf = RandomForestClassifier(n_estimators=100, random_state=42)
+rf.fit(X_res, y_res)
+y_pred = rf.predict(X_test)
+
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print(classification_report(y_test, y_pred))
+
+# ── Figure 1: Confusion Matrix ───────────────────────────────────────────────
+conf_matrix = confusion_matrix(y_test, y_pred)
+fig, ax = plt.subplots(figsize=(6, 5))
+sns.heatmap(conf_matrix, cmap="Blues", annot=True, fmt="d", ax=ax)
+ax.set_title("Confusion Matrix")
+ax.set_xlabel("Predicted")
+ax.set_ylabel("Actual")
+plt.tight_layout()
+fig1_path = "output/figures/fig1_confusion_matrix.png"
+plt.savefig(fig1_path, dpi=150)
+plt.close()
+print("Saved", fig1_path)
+
+# ── Figure 2: Feature Importance ─────────────────────────────────────────────
+importance_df = pd.DataFrame({
+    "Feature": X.columns,
+    "Importance": rf.feature_importances_
+}).sort_values(by="Importance", ascending=False)
+
+fig, ax = plt.subplots(figsize=(8, 12))
+sns.barplot(x="Importance", y="Feature", data=importance_df, ax=ax)
+plt.tight_layout()
+fig2_path = "output/figures/fig2_feature_importance.png"
+plt.savefig(fig2_path, dpi=150)
+plt.close()
+print("Saved", fig2_path)
+
+# ── Figure 3: Count by Gender ─────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(7, 5))
+sns.countplot(data=df, x="readmitted", hue="gender", ax=ax)
+ax.set_title("Count Readmitted by Gender")
+ax.set_xlabel("Readmitted")
+ax.set_ylabel("Count")
+plt.tight_layout()
+fig3_path = "output/figures/fig3_count_by_gender.png"
+plt.savefig(fig3_path, dpi=150)
+plt.close()
+print("Saved", fig3_path)
+
+# ── Figure 4: Correlation Matrix ──────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(14, 10))
+numerical_columns = df.select_dtypes(include="number")
+sns.heatmap(numerical_columns.corr(), cmap="coolwarm", center=0, annot=True, ax=ax)
+ax.set_title("Correlation Matrix")
+plt.tight_layout()
+fig4_path = "output/figures/fig4_correlation_matrix.png"
+plt.savefig(fig4_path, dpi=150)
+plt.close()
+print("Saved", fig4_path)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BUILD THE WORD DOCUMENT
+# ══════════════════════════════════════════════════════════════════════════════
 
 doc = Document()
 
@@ -30,6 +134,11 @@ def add_numbered(doc, items):
         p = doc.add_paragraph(style="Normal")
         p.paragraph_format.left_indent = Inches(0.25)
         p.add_run(f"{i}. {item}")
+
+def add_figure(doc, img_path, caption):
+    doc.add_picture(img_path, width=Inches(5.5))
+    p = doc.add_paragraph(caption, style="Normal")
+    p.runs[0].italic = True
 
 # ── Title ──────────────────────────────────────────────────────────────────
 add_title(doc, "Hospital Readmission Prediction — Diabetic Patients")
@@ -127,19 +236,20 @@ add_normal(doc,
 add_normal(doc, "")
 add_normal(doc,
     "Next, the Random Forest Classifier was trained on the SMOTE-resampled training set and evaluated "
-    "on the original, unseen 20% test set. The model achieved an overall accuracy in the 62–65% "
-    "range. The classification report revealed higher precision and recall for the majority class "
-    "(no early readmission) than for the minority class (early readmission), reflecting the structural "
-    "difficulty of detecting rare clinical events even after balancing. The confusion matrix made this "
-    "trade-off explicit: while the model correctly identifies a substantial proportion of true negatives, "
-    "false negatives (high-risk patients missed by the model) remain the primary area for improvement "
-    "from a clinical safety perspective."
+    "on the original, unseen 20% test set. The model achieved an overall accuracy of "
+    f"{accuracy_score(y_test, y_pred)*100:.1f}%. The classification report revealed higher precision "
+    "and recall for the majority class (no early readmission) than for the minority class (early "
+    "readmission), reflecting the structural difficulty of detecting rare clinical events even after "
+    "balancing. The confusion matrix made this trade-off explicit: while the model correctly identifies "
+    "a substantial proportion of true negatives, false negatives (high-risk patients missed by the "
+    "model) remain the primary area for improvement from a clinical safety perspective."
 )
 add_normal(doc, "")
 add_normal(doc,
     "Feature importance rankings were then extracted from the fitted Random Forest to identify the "
     "variables most predictive of early readmission. The top contributing features were "
-    "time_in_hospital, num_lab_procedures, num_medications, and number_diagnoses — all reflecting "
+    f"{importance_df['Feature'].iloc[0]}, {importance_df['Feature'].iloc[1]}, "
+    f"{importance_df['Feature'].iloc[2]}, and {importance_df['Feature'].iloc[3]} — all reflecting "
     "the severity and clinical complexity of the patient's episode. Demographic variables such as age "
     "and race contributed moderately, while diagnosis codes (diag_1, diag_2, diag_3) also surfaced "
     "as relevant predictors, particularly for patients with primary diabetic complications."
@@ -172,7 +282,7 @@ add_normal(doc,
     "produced by the Random Forest model on the test set. The heatmap makes the trade-off between "
     "correctly detected early readmissions and missed high-risk patients immediately visible."
 )
-add_normal(doc, "Figure 1 – Confusion Matrix (Heatmap)")
+add_figure(doc, fig1_path, "Figure 1 – Confusion Matrix (Heatmap)")
 add_normal(doc, "")
 
 add_normal(doc, "Figure 2 – Feature Importance (Bar Chart):")
@@ -181,7 +291,7 @@ add_normal(doc,
     "Time in hospital, number of lab procedures, and number of medications emerge as the three "
     "strongest predictors of early readmission, guiding prioritisation of clinical risk factors."
 )
-add_normal(doc, "Figure 2 – Feature Importance (Bar Chart)")
+add_figure(doc, fig2_path, "Figure 2 – Feature Importance (Bar Chart)")
 add_normal(doc, "")
 
 add_normal(doc, "Figure 3 – Readmission Count by Gender (Count Plot):")
@@ -190,7 +300,7 @@ add_normal(doc,
     "patients, revealing whether biological sex is a differentiating factor in early readmission "
     "rates within the diabetic population."
 )
-add_normal(doc, "Figure 3 – Count Readmitted by Gender (Count Plot)")
+add_figure(doc, fig3_path, "Figure 3 – Count Readmitted by Gender (Count Plot)")
 add_normal(doc, "")
 
 add_normal(doc, "Figure 4 – Correlation Matrix (Heatmap):")
@@ -199,7 +309,7 @@ add_normal(doc,
     "of correlated predictors (e.g., procedure counts and medication volume) inform future feature "
     "selection and multicollinearity management."
 )
-add_normal(doc, "Figure 4 – Correlation Matrix (Heatmap)")
+add_figure(doc, fig4_path, "Figure 4 – Correlation Matrix (Heatmap)")
 
 # ── 6. Act ─────────────────────────────────────────────────────────────────
 add_heading(doc, "6. Act")
@@ -388,6 +498,7 @@ print("Readmission probability (<30 days) for new patient:", probas)
 
 add_normal(doc, code)
 
+# ── Save ───────────────────────────────────────────────────────────────────
 out_path = "output/Hospital_Readmission_Prediction_20260621_v1.docx"
 doc.save(out_path)
 print(f"Saved: {out_path}")
